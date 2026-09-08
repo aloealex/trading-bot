@@ -1,0 +1,48 @@
+{
+    "broker": "alpaca",
+    "broker_config": {
+        "paper": true,
+        "api_key": "${ALPACA_API_KEY}",
+        "secret_key": "${ALPACA_SECRET_KEY}"
+    },
+    "symbols": [
+        "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
+        "META", "TSLA", "AMD", "INTC", "NFLX"
+    ],
+    "initial_capital": 100000,
+    "max_positions": 8,
+    "max_position_size": 0.20,
+    "min_position_size": 0.01,
+    "buy_threshold": 0.3,
+    "sell_threshold": -0.3,
+    "update_interval": 300,
+    "use_ml": true,
+    "model_path": "./saved_models/ensemble_model",
+    "stop_loss": 0.05,
+    "take_profit": 0.15,
+    "trailing_stop": 0.03,
+    "max_holding_days": 30,
+    "risk_per_trade": 0.02,
+    "position_sizing": "kelly",
+    "close_on_shutdown": false,
+    "lookback_days": 252,
+    "logging": {
+        "level": "INFO",
+        "file": "trading_bot.log"
+    },
+    "notifications": {
+        "telegram": {
+            "enabled": false,
+            "bot_token": "${TELEGRAM_BOT_TOKEN}",
+            "chat_id": "${TELEGRAM_CHAT_ID}"
+        },
+        "email": {
+            "enabled": false,
+            "smtp_server": "smtp.gmail.com",
+            "smtp_port": 587,
+            "username": "${EMAIL_USERNAME}",
+            "password": "${EMAIL_PASSWORD}",
+            "recipient": "${EMAIL_RECIPIENT}"
+        }
+    }
+}

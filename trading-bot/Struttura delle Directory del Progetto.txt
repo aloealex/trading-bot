@@ -1,0 +1,52 @@
+trading_bot/
+├── config/
+│   ├── __init__.py
+│   ├── settings.py          # Configurazioni generali
+│   ├── broker_config.py     # Credenziali broker
+│   └── symbols.py           # Watchlist e parametri per simbolo
+│
+├── data/
+│   ├── __init__.py
+│   ├── market_data.py       # Fetch dati da API
+│   ├── database.py          # Connessione e query DB
+│   └── historical.py        # Gestione dati storici
+│
+├── signals/
+│   ├── __init__.py
+│   ├── clenow.py            # Momentum Score (regressione esponenziale)
+│   ├── raschke.py           # Pattern 3/10, divergenze, Anti
+│   ├── brandimarte.py       # Simulazioni Monte Carlo (VaR, volatilità)
+│   └── ensemble.py          # Combinazione pesata dei segnali
+│
+├── models/
+│   ├── __init__.py
+│   ├── train.py             # Addestramento modello IA
+│   ├── predict.py           # Inferenza
+│   └── saved_models/        # Modelli serializzati
+│
+├── risk/
+│   ├── __init__.py
+│   ├── position_sizing.py   # Regola di Kelly, target volatilità
+│   ├── stop_loss.py         # Stop dinamici
+│   └── portfolio_risk.py    # VaR, correlazioni, drawdown
+│
+├── execution/
+│   ├── __init__.py
+│   ├── broker.py            # Interfaccia broker (IB, Alpaca, etc.)
+│   ├── orders.py            # Gestione ordini
+│   └── portfolio.py         # Stato portafoglio
+│
+├── monitoring/
+│   ├── __init__.py
+│   ├── dashboard.py         # Dashboard Streamlit/Dash
+│   ├── logger.py            # Logging
+│   └── alerts.py            # Sistema di allerta (email, Telegram)
+│
+├── backtest/
+│   ├── __init__.py
+│   ├── engine.py            # Motore di backtesting
+│   └── metrics.py           # Sharpe, drawdown, Win/Loss
+│
+├── main.py                   # Punto di ingresso principale
+├── requirements.txt          # Dipendenze Python
+└── README.md
