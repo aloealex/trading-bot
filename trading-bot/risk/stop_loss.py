@@ -15,10 +15,12 @@ class StopLossManager:
                  fixed_stop: float = 0.05,
                  trailing_stop: float = 0.03,
                  atr_multiplier: float = 2.0,
-                 max_holding_days: int = 30):
+                 max_holding_days: int = 30,
+                 take_profit: Optional[float] = None):
         
         self.fixed_stop = fixed_stop
         self.trailing_stop = trailing_stop
+        self.take_profit = take_profit
         self.atr_multiplier = atr_multiplier
         self.max_holding_days = max_holding_days
         
@@ -39,6 +41,9 @@ class StopLossManager:
             'current_stop': None,
             'stop_type': None
         }
+        # Inizializza subito lo stop: prima restava None e check_stop andava in errore
+        # (confronto float <= None) se veniva chiamato prima di update_prices.
+        self._update_stop(symbol, entry_price)
     
     def remove_position(self, symbol: str):
         """Rimuove una posizione dal monitoraggio."""
@@ -87,15 +92,10 @@ class StopLossManager:
                 atr_stop_price = current_price - atr * self.atr_multiplier
             
             # Prendi il più alto tra i vari stop (più vicino al prezzo)
-            stop_price = max(fixed_stop_price, trailing_stop_price)
+            candidates = {'stop_loss': fixed_stop_price, 'trailing_stop': trailing_stop_price}
             if atr_stop_price:
-                stop_price = max(stop_price, atr_stop_price)
-            stop_type = 'trailing'
-            
-            # Se lo stop è inferiore al fixed, usa il fixed
-            if stop_price < fixed_stop_price:
-                stop_price = fixed_stop_price
-                stop_type = 'fixed'
+                candidates['atr_stop'] = atr_stop_price
+            stop_type, stop_price = max(candidates.items(), key=lambda kv: kv[1])
         
         else:  # sell
             fixed_stop_price = entry * (1 + self.fixed_stop)
@@ -105,14 +105,10 @@ class StopLossManager:
             if atr:
                 atr_stop_price = current_price + atr * self.atr_multiplier
             
-            stop_price = min(fixed_stop_price, trailing_stop_price)
+            candidates = {'stop_loss': fixed_stop_price, 'trailing_stop': trailing_stop_price}
             if atr_stop_price:
-                stop_price = min(stop_price, atr_stop_price)
-            stop_type = 'trailing'
-            
-            if stop_price > fixed_stop_price:
-                stop_price = fixed_stop_price
-                stop_type = 'fixed'
+                candidates['atr_stop'] = atr_stop_price
+            stop_type, stop_price = min(candidates.items(), key=lambda kv: kv[1])
         
         pos['current_stop'] = stop_price
         pos['stop_type'] = stop_type
@@ -128,15 +124,24 @@ class StopLossManager:
             return False, ''
         
         pos = self.positions[symbol]
+        if pos['current_stop'] is None:
+            self._update_stop(symbol, current_price)
         
-        # Check fixed stop
+        # Stop (fisso o trailing)
         if pos['side'] == 'buy':
             if current_price <= pos['current_stop']:
-                return True, 'stop_loss'
-        
+                return True, pos.get('stop_type') or 'stop_loss'
         else:  # sell
             if current_price >= pos['current_stop']:
-                return True, 'stop_loss'
+                return True, pos.get('stop_type') or 'stop_loss'
+        
+        # Take profit
+        if self.take_profit:
+            entry = pos['entry_price']
+            if pos['side'] == 'buy' and current_price >= entry * (1 + self.take_profit):
+                return True, 'take_profit'
+            if pos['side'] == 'sell' and current_price <= entry * (1 - self.take_profit):
+                return True, 'take_profit'
         
         # Check max holding days
         holding_days = (current_date - pos['entry_date']).days

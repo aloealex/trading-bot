@@ -33,11 +33,18 @@ class MonteCarloRisk:
                  simulations: int = 10000,
                  horizon: int = 252,
                  confidence: float = 0.95,
-                 use_bootstrap: bool = True):
+                 use_bootstrap: bool = True,
+                 random_state: Optional[int] = 42):
         self.simulations = simulations
         self.horizon = horizon
         self.confidence = confidence
         self.use_bootstrap = use_bootstrap
+        # Seed fisso: stessa serie di prezzi -> stesse metriche (e stesso gradimento).
+        # Senza seed il gradimento cambiava a ogni chiamata e il backtest non era ripetibile.
+        self.random_state = random_state
+
+    def _rng(self) -> np.random.Generator:
+        return np.random.default_rng(self.random_state)
     
     def _estimate_parameters(self, returns: pd.Series) -> Tuple[float, float]:
         """Stima i parametri del moto browniano geometrico."""
@@ -59,7 +66,7 @@ class MonteCarloRisk:
         drift = (mu - 0.5 * sigma**2) * dt
         diffusion = sigma * np.sqrt(dt)
         
-        log_returns = np.random.normal(
+        log_returns = self._rng().normal(
             drift,
             diffusion,
             (self.simulations, horizon)
@@ -78,8 +85,8 @@ class MonteCarloRisk:
         if len(returns) < 20:
             return np.zeros((self.simulations, horizon))
         
-        idx = np.random.randint(0, len(returns), (self.simulations, horizon))
-        sampled_returns = returns.iloc[idx].values
+        idx = self._rng().integers(0, len(returns), (self.simulations, horizon))
+        sampled_returns = returns.values[idx]
         
         cumulative_returns = np.cumprod(1 + sampled_returns, axis=1)
         future_prices = current_price * cumulative_returns
@@ -113,11 +120,11 @@ class MonteCarloRisk:
         
         sorted_returns = np.sort(future_returns)
         
-        var_95_idx = int((1 - self.confidence) * self.simulations)
+        var_95_idx = max(1, int((1 - self.confidence) * self.simulations))
         var_95 = sorted_returns[var_95_idx]
         cvar_95 = sorted_returns[:var_95_idx].mean()
         
-        var_99_idx = int((1 - 0.99) * self.simulations)
+        var_99_idx = max(1, int((1 - 0.99) * self.simulations))
         var_99 = sorted_returns[var_99_idx]
         cvar_99 = sorted_returns[:var_99_idx].mean()
         
@@ -132,7 +139,8 @@ class MonteCarloRisk:
         calmar = (returns.mean() * 252) / abs(max_drawdown) if max_drawdown != 0 else 0
         
         probability_of_loss = (future_returns < 0).mean()
-        expected_shortfall = future_returns[future_returns < 0].mean()
+        losses = future_returns[future_returns < 0]
+        expected_shortfall = losses.mean() if len(losses) > 0 else 0.0
         
         ci_lower = np.percentile(future_returns, 2.5)
         ci_upper = np.percentile(future_returns, 97.5)

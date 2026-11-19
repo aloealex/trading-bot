@@ -63,7 +63,8 @@ class MarketData:
             try:
                 ticker = yf.Ticker(symbol)
                 end_date = datetime.now()
-                start_date = end_date - timedelta(days=lookback_days * 2)
+                # ~1.6 giorni di calendario per giorno di borsa, più un margine
+                start_date = end_date - timedelta(days=int(lookback_days * 1.6) + 10)
                 
                 df = ticker.history(start=start_date, end=end_date, interval=interval)
                 
@@ -80,8 +81,9 @@ class MarketData:
                     'Volume': 'volume'
                 })
                 
-                # Aggiungi info aggiuntive
-                df['symbol'] = symbol
+                df = df[[c for c in ['open', 'high', 'low', 'close', 'volume'] if c in df.columns]]
+                df.index = pd.to_datetime(df.index).tz_localize(None)
+                df = df.iloc[-lookback_days:]
                 
                 # Cache
                 if self.cache_enabled:

@@ -1,6 +1,8 @@
 # monitoring/alerts.py
+import json
 import requests
 import smtplib
+from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Dict, Any, Optional, List
@@ -13,6 +15,23 @@ class AlertSystem:
     Sistema di allerta per notifiche via Telegram, Email, etc.
     """
     
+    @classmethod
+    def from_settings(cls, n) -> 'AlertSystem':
+        """Crea il sistema di alert da config.settings.NotificationSettings."""
+        return cls(
+            telegram_enabled=n.telegram_enabled,
+            telegram_bot_token=n.telegram_bot_token,
+            telegram_chat_id=n.telegram_chat_id,
+            email_enabled=n.email_enabled,
+            email_config={
+                'smtp_server': n.email_smtp_server,
+                'smtp_port': n.email_smtp_port,
+                'username': n.email_username,
+                'password': n.email_password,
+                'recipient': n.email_recipient,
+            },
+        )
+
     def __init__(self,
                  telegram_enabled: bool = False,
                  telegram_bot_token: Optional[str] = None,

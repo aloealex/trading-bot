@@ -15,18 +15,22 @@ class PositionSizer:
                  max_positions: int = 10,
                  kelly_fraction: float = 0.25,
                  volatility_target: float = 0.15,
-                 max_position_size: float = 0.20):
+                 max_position_size: float = 0.20,
+                 base_fraction: float = 0.10,
+                 min_trades_for_kelly: int = 20):
         
         self.capital = capital
         self.max_positions = max_positions
         self.kelly_fraction = kelly_fraction
         self.volatility_target = volatility_target
         self.max_position_size = max_position_size
+        self.base_fraction = base_fraction
+        self.min_trades_for_kelly = min_trades_for_kelly
         self.trade_history = []
     
     def kelly_sizing(self, win_rate: float, avg_win: float, avg_loss: float) -> float:
         """Calcola la frazione di Kelly."""
-        if avg_loss == 0:
+        if avg_loss == 0 or avg_win == 0:
             return 0.0
         
         b = avg_win / avg_loss
@@ -57,31 +61,26 @@ class PositionSizer:
         """Calcola la dimensione della posizione."""
         max_position_value = capital * self.max_position_size
         
-        # Kelly sizing
-        win_rate = self._calculate_win_rate()
-        avg_win = self._calculate_avg_win()
-        avg_loss = self._calculate_avg_loss()
-        kelly_fraction = self.kelly_sizing(win_rate, avg_win, avg_loss)
-        
-        # Volatility sizing
+        signal_factor = min(1.0, abs(signal))
+
+        # Dimensione base: quota fissa dell'equity, scalata per l'intensità del segnale
+        # (stessa regola del backtest, così i risultati sono confrontabili).
+        base_value = capital * self.base_fraction * signal_factor
+
+        # Kelly frazionato solo con uno storico sufficiente: con pochi trade la stima
+        # è puro rumore (prima, con lo storico vuoto, si investiva ~1% per titolo).
+        kelly_fraction = 0.0
+        if len(self.trade_history) >= self.min_trades_for_kelly:
+            kelly_fraction = self.kelly_sizing(self._calculate_win_rate(),
+                                               self._calculate_avg_win(),
+                                               self._calculate_avg_loss())
+            base_value = capital * max(kelly_fraction, self.base_fraction * 0.25) * signal_factor
+
+        # Tetto di volatilità: titoli molto volatili ricevono meno capitale
         volatility_shares = self.volatility_sizing(volatility, capital, price)
         volatility_value = volatility_shares * price
-        
-        # Sizing basato sul segnale
-        signal_factor = abs(signal)
-        base_position_value = min(max_position_value * signal_factor, capital * 0.10)
-        
-        # Combina i metodi
-        if kelly_fraction > 0:
-            kelly_value = capital * kelly_fraction * signal_factor
-        else:
-            kelly_value = base_position_value
-        
-        final_value = min(kelly_value, volatility_value * 1.5) if volatility_value > 0 else kelly_value
+        final_value = min(base_value, volatility_value) if volatility_value > 0 else base_value
         final_value = min(final_value, max_position_value)
-        
-        if final_value < capital * 0.01 and signal > 0.3:
-            final_value = capital * 0.01
         
         shares = int(final_value / price) if price > 0 else 0
         
@@ -91,7 +90,7 @@ class PositionSizer:
             'capital_percent': (shares * price) / capital * 100 if capital > 0 else 0,
             'kelly_fraction': kelly_fraction,
             'volatility_shares': volatility_shares,
-            'method': 'kelly_volatility'
+            'method': 'kelly' if kelly_fraction > 0 else 'base'
         }
     
     def _calculate_win_rate(self) -> float:

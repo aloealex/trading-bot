@@ -40,6 +40,7 @@ class PortfolioRiskManager:
         self.market_index = market_index
         
         self.positions = {}
+        self.cash = 0.0  # liquidità: senza, i pesi erano calcolati solo sull'investito
         self.price_history = {}
         self.returns_history = {}
     
@@ -68,9 +69,12 @@ class PortfolioRiskManager:
             total += pos['value']
         return total
     
+    def set_cash(self, cash: float):
+        self.cash = max(0.0, float(cash))
+
     def calculate_portfolio_weights(self) -> Dict[str, float]:
-        """Calcola i pesi delle posizioni."""
-        total = self.calculate_portfolio_value()
+        """Peso di ogni posizione sul valore TOTALE del conto (posizioni + liquidità)."""
+        total = self.calculate_portfolio_value() + self.cash
         if total == 0:
             return {}
         return {symbol: pos['value'] / total for symbol, pos in self.positions.items()}
@@ -80,17 +84,15 @@ class PortfolioRiskManager:
         Calcola i rendimenti storici del portafoglio.
         """
         if not self.positions:
-            return pd.Series()
+            return pd.Series(dtype=float)
         
         weights = self.calculate_portfolio_weights()
-        portfolio_returns = pd.Series(index=self.returns_history.get(list(self.positions.keys())[0], pd.Series()).index)
+        parts = [self.returns_history[s] * w for s, w in weights.items() if s in self.returns_history]
+        if not parts:
+            return pd.Series(dtype=float)
         
-        for symbol, weight in weights.items():
-            if symbol in self.returns_history:
-                returns = self.returns_history[symbol] * weight
-                portfolio_returns = portfolio_returns.add(returns, fill_value=0)
-        
-        return portfolio_returns
+        portfolio_returns = pd.concat(parts, axis=1).fillna(0).sum(axis=1)
+        return portfolio_returns.iloc[-period:]
     
     def calculate_risk_metrics(self) -> PortfolioRiskMetrics:
         """
@@ -177,9 +179,10 @@ class PortfolioRiskManager:
         beta = 1
         if self.market_index and self.market_index in self.returns_history:
             market_returns = self.returns_history[self.market_index]
-            if len(portfolio_returns) > 0:
-                covariance = np.cov(portfolio_returns, market_returns)[0, 1]
-                variance = np.var(market_returns)
+            aligned = pd.concat([portfolio_returns, market_returns], axis=1, join='inner').dropna()
+            if len(aligned) > 2:
+                covariance = np.cov(aligned.iloc[:, 0], aligned.iloc[:, 1])[0, 1]
+                variance = np.var(aligned.iloc[:, 1], ddof=1)
                 beta = covariance / variance if variance > 0 else 1
         
         return PortfolioRiskMetrics(

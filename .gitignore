@@ -1,0 +1,14 @@
+# segreti
+.env
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+# output del bot
+*.log
+trading-bot/state/
+trading-bot/saved_models/
+trading-bot/backtest_output/
+*.db

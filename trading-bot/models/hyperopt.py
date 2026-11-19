@@ -58,14 +58,17 @@ class HyperparameterOptimizer:
                 
                 # Addestra e valuta
                 import xgboost as xgb
-                model = xgb.XGBRegressor(**params)
-                model.fit(X_train, y_train, eval_set=[(X_val, y_val)], early_stopping_rounds=50, verbose=False)
+                # xgboost >= 2: early_stopping_rounds va nel costruttore
+                model = xgb.XGBRegressor(**params, early_stopping_rounds=50, verbosity=0,
+                                         random_state=self.random_state)
+                model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
                 
                 val_pred = model.predict(X_val)
-                score = r2_score(y_val, val_pred)
+                # correlazione predizione/rendimento: più significativa dell'R² per il trading
+                score = np.corrcoef(val_pred, y_val)[0, 1] if np.std(val_pred) > 0 else 0.0
                 scores.append(score)
             
-            return np.mean(scores)
+            return float(np.mean(scores))
         
         # Crea lo studio
         self.study = optuna.create_study(direction='maximize')
@@ -75,7 +78,7 @@ class HyperparameterOptimizer:
         self.best_score = self.study.best_value
         
         return self.best_params
-    
+
     def optimize_neural_network(self, X: np.ndarray, y: np.ndarray) -> Dict[str, Any]:
         """
         Ottimizza iperparametri per Rete Neurale.
@@ -116,54 +119,23 @@ class HyperparameterOptimizer:
                 
                 model.train(X_train, y_train, X_val, y_val)
                 val_pred = model.predict(X_val)
-                score = r2_score(y_val, val_pred)
+                score = np.corrcoef(val_pred, y_val)[0, 1] if np.std(val_pred) > 0 else 0.0
                 scores.append(score)
             
-            return np.mean(scores)
+            return float(np.mean(scores))
         
         self.study = optuna.create_study(direction='maximize')
         self.study.optimize(objective, n_trials=self.n_trials)
         
-        self.best_params = self.study.best_params
+        p = self.study.best_params
+        # converte i parametri "piatti" di Optuna nel formato del costruttore
+        self.best_params = {
+            'hidden_dims': [p['hidden_1'], p['hidden_2'], p['hidden_3']],
+            'dropout_rate': p['dropout_rate'],
+            'learning_rate': p['learning_rate'],
+            'batch_size': p['batch_size'],
+        }
         self.best_score = self.study.best_value
-        
-        return self.best_params
-    
-    def optimize_ensemble(self, X: np.ndarray, y: np.ndarray) -> Dict[str, float]:
-        """
-        Ottimizza i pesi dell'ensemble.
-        """
-        # Predizioni dei modelli base
-        from .xgboost_model import XGBoostTradingModel
-        from .neural_network import NeuralTradingModel
-        
-        models = [
-            XGBoostTradingModel(n_estimators=500),
-            NeuralTradingModel(hidden_dims=[256, 128])
-        ]
-        
-        for model in models:
-            model.train(X, y)
-        
-        predictions = np.column_stack([m.predict(X) for m in models])
-        
-        # Ottimizza i pesi
-        def objective(weights):
-            ensemble_pred = np.dot(predictions, weights)
-            return -r2_score(y, ensemble_pred)
-        
-        # Vincoli: somma pesi = 1, pesi >= 0
-        from scipy.optimize import minimize
-        
-        initial_weights = np.array([0.5, 0.5])
-        bounds = [(0, 1) for _ in range(len(models))]
-        constraint = {'type': 'eq', 'fun': lambda w: np.sum(w) - 1}
-        
-        result = minimize(objective, initial_weights, 
-                         bounds=bounds, constraints=constraint)
-        
-        self.best_params = dict(zip(['xgboost', 'neural'], result.x))
-        self.best_score = -result.fun
         
         return self.best_params
     

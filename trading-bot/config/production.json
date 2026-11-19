@@ -3,7 +3,11 @@
     "broker_config": {
         "paper": true,
         "api_key": "${ALPACA_API_KEY}",
-        "secret_key": "${ALPACA_SECRET_KEY}"
+        "secret_key": "${ALPACA_SECRET_KEY}",
+        "data_feed": "iex",
+        "host": "127.0.0.1",
+        "port": 7497,
+        "client_id": 1
     },
     "symbols": [
         "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
@@ -11,24 +15,32 @@
     ],
     "initial_capital": 100000,
     "max_positions": 8,
+    "position_size": 0.10,
     "max_position_size": 0.20,
     "min_position_size": 0.01,
     "buy_threshold": 0.3,
     "sell_threshold": -0.3,
-    "update_interval": 300,
-    "use_ml": true,
-    "model_path": "./saved_models/ensemble_model",
     "stop_loss": 0.05,
     "take_profit": 0.15,
     "trailing_stop": 0.03,
     "max_holding_days": 30,
-    "risk_per_trade": 0.02,
-    "position_sizing": "kelly",
+    "commission": 0.001,
+    "slippage": 0.0005,
+    "update_interval": 300,
     "close_on_shutdown": false,
-    "lookback_days": 252,
+    "use_ml": false,
+    "model_type": "xgboost",
+    "model_path": "./saved_models/xgboost",
+    "lookback_days": 300,
+    "ensemble_weights": {
+        "momentum": 0.40,
+        "raschke": 0.25,
+        "risk": 0.20,
+        "mean_reversion": 0.15
+    },
+    "state_file": "./state/bot_state.json",
     "logging": {
-        "level": "INFO",
-        "file": "trading_bot.log"
+        "level": "INFO"
     },
     "notifications": {
         "telegram": {

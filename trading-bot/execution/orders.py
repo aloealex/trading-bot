@@ -39,6 +39,7 @@ class Order:
     status: OrderStatus = OrderStatus.PENDING
     order_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     client_order_id: Optional[str] = None
+    broker_order_id: Optional[str] = None
     notes: Optional[str] = None
     
     def to_dict(self) -> Dict:
@@ -133,10 +134,20 @@ class OrderManager:
                 order.filled_quantity = filled_quantity
             order.filled_at = datetime.now()
         
-        if status == OrderStatus.FILLED:
+        # Un ordine eseguito, rifiutato o annullato non è più "aperto".
+        # Prima restavano tutti in open_orders e dopo 20 ordini il bot si bloccava.
+        if status in (OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELLED):
             self.closed_orders.append(order)
             del self.open_orders[order_id]
         
+        return order
+
+    def record_result(self, order: Order) -> Order:
+        """Registra l'esito restituito dal broker per un ordine creato con create_order."""
+        if order.order_id in self.open_orders:
+            self.update_order(order.order_id, order.status,
+                              filled_price=order.filled_price,
+                              filled_quantity=order.filled_quantity)
         return order
     
     def get_order(self, order_id: str) -> Optional[Order]:
@@ -178,18 +189,8 @@ class OrderManager:
         """Calcola le posizioni attuali dagli ordini aperti e chiusi."""
         positions = {}
         
-        # Ordini aperti
-        for order in self.open_orders.values():
-            if order.status == OrderStatus.FILLED:
-                if order.symbol not in positions:
-                    positions[order.symbol] = 0
-                if order.side == OrderSide.BUY:
-                    positions[order.symbol] += order.quantity
-                else:
-                    positions[order.symbol] -= order.quantity
-        
-        # Ordini chiusi (ultimi)
-        for order in self.closed_orders[-50:]:  # Ultimi 50
+        # Tutti gli ordini eseguiti (prima solo gli ultimi 50: posizioni sbagliate)
+        for order in self.closed_orders:
             if order.status == OrderStatus.FILLED:
                 if order.symbol not in positions:
                     positions[order.symbol] = 0

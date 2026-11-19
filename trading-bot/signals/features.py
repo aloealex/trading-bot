@@ -85,8 +85,9 @@ class FeatureEngineer:
         
         # 10. Price Patterns
         # Higher High / Lower Low
-        features['higher_high'] = 1 if prices.iloc[-1] > prices.iloc[-10:].max() else 0
-        features['lower_low'] = 1 if prices.iloc[-1] < prices.iloc[-10:].min() else 0
+        # Confronto con le 10 barre precedenti (escludendo quella corrente)
+        features['higher_high'] = 1 if prices.iloc[-1] > prices.iloc[-11:-1].max() else 0
+        features['lower_low'] = 1 if prices.iloc[-1] < prices.iloc[-11:-1].min() else 0
         
         # 11. Range
         features['range_10d'] = (prices.iloc[-10:].max() - prices.iloc[-10:].min()) / prices.iloc[-10:].mean()

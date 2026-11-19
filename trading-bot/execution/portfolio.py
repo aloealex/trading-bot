@@ -20,10 +20,8 @@ class PortfolioManager:
         self._last_update = datetime.now()
     
     def update_position(self, symbol: str, quantity: int, price: float):
-        """Aggiorna una posizione."""
+        """Aggiorna una posizione (quantity = variazione: + acquisto, - vendita)."""
         if quantity == 0:
-            if symbol in self.positions:
-                del self.positions[symbol]
             return
         
         if symbol in self.positions:
@@ -31,12 +29,20 @@ class PortfolioManager:
             pos = self.positions[symbol]
             old_quantity = pos['quantity']
             
-            # Calcola il costo medio
-            total_cost = pos['avg_cost'] * old_quantity + price * quantity
             new_quantity = old_quantity + quantity
+            if new_quantity == 0:
+                del self.positions[symbol]
+                self._last_update = datetime.now()
+                return
+            
+            # Il costo medio cambia solo quando si AUMENTA la posizione.
+            # Prima anche le vendite parziali lo ricalcolavano (con quantità negativa),
+            # producendo un costo medio e un PnL sbagliati.
+            if quantity > 0:
+                total_cost = pos['avg_cost'] * old_quantity + price * quantity
+                pos['avg_cost'] = total_cost / new_quantity
             
             pos['quantity'] = new_quantity
-            pos['avg_cost'] = total_cost / new_quantity if new_quantity > 0 else 0
             pos['current_price'] = price
             pos['market_value'] = new_quantity * price
             pos['unrealized_pnl'] = pos['market_value'] - new_quantity * pos['avg_cost']
@@ -82,6 +88,10 @@ class PortfolioManager:
         else:
             self.cash += quantity * price
         
+        # PnL realizzato sulle vendite (rispetto al costo medio)
+        if side == 'sell' and symbol in self.positions:
+            transaction['realized_pnl'] = (price - self.positions[symbol]['avg_cost']) * quantity
+        
         # Aggiorna la posizione
         if side == 'buy':
             self.update_position(symbol, quantity, price)
@@ -102,6 +112,19 @@ class PortfolioManager:
             'positions_count': len(self.positions)
         })
     
+    def mark_to_market(self, prices: Dict[str, float]):
+        """Aggiorna i prezzi correnti delle posizioni e registra il valore del portafoglio."""
+        for symbol, price in prices.items():
+            pos = self.positions.get(symbol)
+            if pos is None or not price or price <= 0:
+                continue
+            pos['current_price'] = price
+            pos['market_value'] = pos['quantity'] * price
+            cost = pos['quantity'] * pos['avg_cost']
+            pos['unrealized_pnl'] = pos['market_value'] - cost
+            pos['unrealized_pnl_percent'] = pos['unrealized_pnl'] / cost * 100 if cost else 0
+        self._record_value()
+
     def get_positions_value(self) -> float:
         """Calcola il valore totale delle posizioni."""
         return sum(pos['market_value'] for pos in self.positions.values())
@@ -120,15 +143,9 @@ class PortfolioManager:
             return {}
         
         pos = self.positions[symbol]
-        realized_pnl = 0
         unrealized_pnl = pos.get('unrealized_pnl', 0)
-        
-        # Calcola il realized PnL dalle transazioni
-        for tx in self.transactions:
-            if tx['symbol'] == symbol and tx['side'] == 'sell':
-                # Calcola il costo medio al momento della vendita
-                # Implementazione semplificata
-                pass
+        realized_pnl = sum(tx.get('realized_pnl', 0) for tx in self.transactions
+                           if tx['symbol'] == symbol and tx['side'] == 'sell')
         
         return {
             'symbol': symbol,
