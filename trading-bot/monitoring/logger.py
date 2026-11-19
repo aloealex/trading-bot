@@ -12,7 +12,7 @@ class TradingLogger:
     
     def __init__(self,
                  log_file: str = 'trading.log',
-                 json_log: bool = True,
+                 json_log: bool = False,
                  level: str = 'INFO'):
         
         self.log_file = log_file
@@ -29,6 +29,11 @@ class TradingLogger:
         """Configura il logger."""
         self.logger = logging.getLogger('trading_bot')
         self.logger.setLevel(self.level)
+        # Evita handler duplicati (ogni istanza ne aggiungeva altri: righe di log ripetute)
+        # e la doppia stampa tramite il root logger.
+        self.logger.propagate = False
+        if self.logger.handlers:
+            return
         
         # Handler per file
         file_handler = logging.FileHandler(self.log_file)
@@ -72,7 +77,7 @@ class TradingLogger:
         self.trades.append(entry)
         
         if self.json_log:
-            self.logger.info(json.dumps(entry))
+            self.logger.info(json.dumps(entry, default=str))
         else:
             self.logger.info(f"TRADE: {symbol} {side} {quantity} @ {price:.2f}")
     
@@ -96,7 +101,7 @@ class TradingLogger:
         self.signals.append(entry)
         
         if self.json_log:
-            self.logger.info(json.dumps(entry))
+            self.logger.info(json.dumps(entry, default=str))
         else:
             self.logger.info(f"SIGNAL: {symbol} {signal:.3f} ({confidence:.2%})")
     
@@ -116,10 +121,24 @@ class TradingLogger:
         self.errors.append(entry)
         
         if self.json_log:
-            self.logger.error(json.dumps(entry))
+            self.logger.error(json.dumps(entry, default=str))
         else:
-            self.logger.error(f"ERROR: {error}")
+            self.logger.error(f"{error} {context}" if context else error)
     
+    def log_warning(self, message: str, context: Optional[Dict] = None, **kwargs):
+        """Registra un avviso."""
+        entry = {
+            'type': 'warning',
+            'timestamp': datetime.now().isoformat(),
+            'message': message,
+            'context': context or {},
+            **kwargs
+        }
+        if self.json_log:
+            self.logger.warning(json.dumps(entry, default=str))
+        else:
+            self.logger.warning(message)
+
     def log_info(self, message: str, **kwargs):
         """Registra un messaggio informativo."""
         entry = {
@@ -130,7 +149,7 @@ class TradingLogger:
         }
         
         if self.json_log:
-            self.logger.info(json.dumps(entry))
+            self.logger.info(json.dumps(entry, default=str))
         else:
             self.logger.info(message)
     
@@ -143,7 +162,7 @@ class TradingLogger:
         }
         
         if self.json_log:
-            self.logger.info(json.dumps(entry))
+            self.logger.info(json.dumps(entry, default=str))
         else:
             self.logger.info(f"PERFORMANCE: {json.dumps(metrics, default=str)}")
     

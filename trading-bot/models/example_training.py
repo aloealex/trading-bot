@@ -1,87 +1,35 @@
-# example_training.py
-import pandas as pd
-import yfinance as yf
-from models.trainer import ModelTrainer
-from models.data_pipeline import DataPipeline
-from models.ensemble_model import EnsembleModel
+# models/example_training.py
+"""
+Esempio di addestramento del modello ML (eseguire dalla cartella del progetto):
+    python -m models.example_training
+Equivale a:  python main.py --mode train --years 8
+"""
+from data.loaders import load_prices
+from models.train import ModelTrainer
+from models.predict import ModelPredictor
+
 
 def main():
-    # 1. Scarica i dati
-    print("Scaricamento dati...")
     symbols = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'AMD', 'INTC']
-    
-    data = []
-    for symbol in symbols:
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period='5y')
-        df['symbol'] = symbol
-        data.append(df)
-    
-    df = pd.concat(data)
-    print(f"Dati caricati: {len(df)} righe")
-    
-    # 2. Prepara i dati per il training
-    print("\nPreparazione dati...")
-    pipeline = DataPipeline()
-    features_df = pipeline.create_features(df)
-    X, y = pipeline.prepare_data(features_df)
-    
-    print(f"Feature: {X.shape[1]}, Samples: {X.shape[0]}")
-    
-    # 3. Addestra il modello
-    print("\nAddestramento modello...")
-    trainer = ModelTrainer(df, model_type='ensemble')
-    train_metrics = trainer.train()
-    
-    # 4. Visualizza i risultati
-    print("\nMetriche di addestramento:")
-    for key, value in train_metrics.items():
-        print(f"  {key}: {value:.4f}")
-    
-    print("\nMetriche di valutazione:")
-    if trainer.metrics:
-        for key, value in trainer.metrics.__dict__.items():
-            print(f"  {key}: {value:.4f}")
-    
-    # 5. Feature importance
-    print("\nFeature Importance (Top 10):")
-    importance = trainer.model.get_feature_importance()
-    sorted_imp = sorted(importance.items(), key=lambda x: x[1], reverse=True)
-    for feature, imp in sorted_imp[:10]:
-        print(f"  {feature}: {imp:.4f}")
-    
-    # 6. Salva il modello
-    print("\nSalvataggio modello...")
-    trainer.save('./saved_models/ensemble_model')
-    print("Modello salvato!")
-    
-    # 7. Test su nuovi dati
-    print("\nTest su nuovi dati...")
-    # Scarica nuovi dati
-    new_data = yf.download('AAPL', period='1mo')
-    new_features = pipeline.create_features(new_data)
-    X_new = pipeline.transform(new_features)
-    
-    predictions = trainer.predict(X_new[-5:])
-    print(f"Ultime 5 predizioni: {predictions}")
-    
-    # 8. Esegui il modello in produzione
-    print("\nPredizioni in tempo reale:")
-    model = trainer.model
-    
-    for i, pred in enumerate(predictions):
-        if pred > 0.5:
-            signal = "STRONG BUY"
-        elif pred > 0.2:
-            signal = "BUY"
-        elif pred < -0.5:
-            signal = "STRONG SELL"
-        elif pred < -0.2:
-            signal = "SELL"
-        else:
-            signal = "HOLD"
-        
-        print(f"  {i+1}: Gradimento = {pred:.3f} -> {signal}")
+    print("Scaricamento dati...")
+    data = load_prices(symbols, years=8)
+    if not data:
+        raise SystemExit("Nessun dato scaricato: controlla la connessione internet")
 
-if __name__ == "__main__":
+    trainer = ModelTrainer(model_type='xgboost')
+    meta = trainer.train(data)
+    print(f"Training {meta['train_period']}  |  Test {meta['test_period']}")
+    for k, v in meta['test_metrics'].items():
+        print(f"  {k:24s} {v:+.4f}")
+
+    path = './saved_models/xgboost'
+    trainer.save(path)
+
+    predictor = ModelPredictor(path)
+    for symbol, df in data.items():
+        r = predictor.predict_symbol(df)
+        print(f"{symbol}: gradimento {r['gradimento']:+.3f}")
+
+
+if __name__ == '__main__':
     main()

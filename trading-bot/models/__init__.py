@@ -1,14 +1,20 @@
 # models/__init__.py
-from .train import ModelTrainer
+from .features import FEATURE_NAMES, build_features, build_dataset
+from .train import ModelTrainer, create_model
 from .predict import ModelPredictor
 from .xgboost_model import XGBoostTradingModel
-from .neural_network import NeuralTradingModel
+from .neural_network import NeuralTradingModel, TORCH_AVAILABLE
 from .ensemble_model import EnsembleModel
 
 __all__ = [
+    'FEATURE_NAMES',
+    'build_features',
+    'build_dataset',
     'ModelTrainer',
+    'create_model',
     'ModelPredictor',
     'XGBoostTradingModel',
     'NeuralTradingModel',
-    'EnsembleModel'
+    'TORCH_AVAILABLE',
+    'EnsembleModel',
 ]

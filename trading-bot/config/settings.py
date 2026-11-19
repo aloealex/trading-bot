@@ -1,13 +1,16 @@
 # config/settings.py
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import List, Dict, Optional, Any
+import json
 import os
-from datetime import time
+import re
 
 @dataclass
 class BrokerSettings:
     """Configurazione del broker"""
-    broker_type: str = 'alpaca'  # 'alpaca', 'ib', 'binance'
+    broker_type: str = 'alpaca'  # 'alpaca', 'ib', 'sim' (simulato, nessun ordine reale)
+    paper: bool = True           # Alpaca: conto paper (finto). Metti False SOLO per il conto reale
+    data_feed: str = 'iex'       # Alpaca: 'iex' gratuito, 'sip' a pagamento
     host: str = '127.0.0.1'
     port: int = 7497
     client_id: int = 1
@@ -30,6 +33,7 @@ class TradingSettings:
     max_positions: int = 10
     max_position_size: float = 0.20  # 20% del capitale per posizione
     min_position_size: float = 0.01   # 1% del capitale per posizione
+    position_size: float = 0.10       # quota base per posizione (x |gradimento|), live e backtest
     
     # Risk management
     kelly_fraction: float = 0.25
@@ -84,8 +88,9 @@ class SignalSettings:
 @dataclass
 class ModelSettings:
     """Configurazione del modello IA"""
-    model_type: str = 'ensemble'  # 'xgboost', 'neural', 'lstm', 'ensemble'
-    lookback_days: int = 252
+    use_ml: bool = False          # False = segnali diretti (Clenow/Raschke/Monte Carlo)
+    model_type: str = 'xgboost'   # 'xgboost', 'neural', 'ensemble'
+    lookback_days: int = 300      # barre di storico scaricate (servono almeno 200 + margine)
     retrain_frequency: int = 30  # giorni
     sequence_length: int = 20
     
@@ -122,7 +127,7 @@ class ModelSettings:
     })
     
     # Model paths
-    model_path: str = './saved_models'
+    model_path: str = './saved_models/xgboost'
     use_gpu: bool = False
 
 @dataclass
@@ -160,6 +165,7 @@ class Settings:
     update_interval: int = 300  # secondi
     log_level: str = 'INFO'
     close_on_shutdown: bool = False
+    state_file: str = './state/bot_state.json'  # letto dalla dashboard
     
     def to_dict(self) -> Dict:
         """Converte le impostazioni in un dizionario"""
@@ -168,6 +174,7 @@ class Settings:
             'trading': self.trading.__dict__,
             'signals': self.signals.__dict__,
             'model': self.model.__dict__,
+            'notifications': self.notifications.__dict__,
             'symbols': self.symbols,
             'update_interval': self.update_interval,
             'log_level': self.log_level,
@@ -176,24 +183,89 @@ class Settings:
     
     @classmethod
     def from_dict(cls, data: Dict) -> 'Settings':
-        """Crea impostazioni da un dizionario"""
+        """Crea impostazioni da un dizionario annidato (stessa struttura di to_dict)."""
         settings = cls()
-        
-        if 'broker' in data:
-            settings.broker = BrokerSettings(**data['broker'])
-        if 'trading' in data:
-            settings.trading = TradingSettings(**data['trading'])
-        if 'signals' in data:
-            settings.signals = SignalSettings(**data['signals'])
-        if 'model' in data:
-            settings.model = ModelSettings(**data['model'])
-        if 'symbols' in data:
-            settings.symbols = data['symbols']
-        if 'update_interval' in data:
-            settings.update_interval = data['update_interval']
-        if 'log_level' in data:
-            settings.log_level = data['log_level']
-        if 'close_on_shutdown' in data:
-            settings.close_on_shutdown = data['close_on_shutdown']
-        
+        sections = {'broker': BrokerSettings, 'trading': TradingSettings, 'signals': SignalSettings,
+                    'model': ModelSettings, 'notifications': NotificationSettings}
+        for name, klass in sections.items():
+            if isinstance(data.get(name), dict):
+                setattr(settings, name, _build(klass, data[name]))
+        for key in ('symbols', 'update_interval', 'log_level', 'close_on_shutdown', 'state_file'):
+            if key in data:
+                setattr(settings, key, data[key])
         return settings
+
+    @classmethod
+    def from_json(cls, path: str) -> 'Settings':
+        """
+        Carica config/production.json. Accetta sia il formato "piatto" storico
+        (initial_capital, buy_threshold, ... al primo livello) sia quello annidato.
+        I valori "${NOME}" vengono sostituiti con le variabili d'ambiente (file .env).
+        """
+        with open(path, encoding='utf-8') as f:
+            raw = _expand_env(json.load(f))
+
+        if isinstance(raw.get('broker'), dict):  # formato annidato
+            return cls.from_dict(raw)
+
+        s = cls()
+        # broker
+        if 'broker' in raw:
+            s.broker.broker_type = raw['broker']
+        bc = raw.get('broker_config', {})
+        s.broker.paper = bc.get('paper', s.broker.paper)
+        s.broker.alpaca_api_key = bc.get('api_key') or s.broker.alpaca_api_key
+        s.broker.alpaca_secret_key = bc.get('secret_key') or s.broker.alpaca_secret_key
+        s.broker.data_feed = bc.get('data_feed', s.broker.data_feed)
+        s.broker.ib_host = bc.get('host', s.broker.ib_host)
+        s.broker.ib_port = int(bc.get('port', s.broker.ib_port))
+        s.broker.ib_client_id = int(bc.get('client_id', s.broker.ib_client_id))
+        # trading: tutte le chiavi con lo stesso nome del campo
+        _apply(s.trading, raw)
+        _apply(s.signals, raw)
+        # modello
+        _apply(s.model, raw)
+        # generali
+        for key in ('symbols', 'update_interval', 'close_on_shutdown', 'state_file'):
+            if key in raw:
+                setattr(s, key, raw[key])
+        s.log_level = raw.get('logging', {}).get('level', s.log_level)
+        # notifiche
+        notif = raw.get('notifications', {})
+        tg, em = notif.get('telegram', {}), notif.get('email', {})
+        n = s.notifications
+        n.telegram_enabled = bool(tg.get('enabled', n.telegram_enabled))
+        n.telegram_bot_token = tg.get('bot_token', n.telegram_bot_token)
+        n.telegram_chat_id = tg.get('chat_id', n.telegram_chat_id)
+        n.email_enabled = bool(em.get('enabled', n.email_enabled))
+        n.email_smtp_server = em.get('smtp_server', n.email_smtp_server)
+        n.email_smtp_port = int(em.get('smtp_port', n.email_smtp_port))
+        n.email_username = em.get('username', n.email_username)
+        n.email_password = em.get('password', n.email_password)
+        n.email_recipient = em.get('recipient', n.email_recipient)
+        return s
+
+
+def _build(klass, values: Dict):
+    """Crea un dataclass ignorando le chiavi sconosciute (prima un refuso mandava in crash)."""
+    names = {f.name for f in fields(klass)}
+    return klass(**{k: v for k, v in values.items() if k in names})
+
+
+def _apply(obj, values: Dict):
+    for f in fields(obj):
+        if f.name in values:
+            setattr(obj, f.name, values[f.name])
+
+
+_ENV = re.compile(r'\$\{([A-Za-z0-9_]+)\}')
+
+
+def _expand_env(value):
+    if isinstance(value, dict):
+        return {k: _expand_env(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_env(v) for v in value]
+    if isinstance(value, str):
+        return _ENV.sub(lambda m: os.getenv(m.group(1), ''), value)
+    return value

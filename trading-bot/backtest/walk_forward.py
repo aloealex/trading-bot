@@ -17,7 +17,7 @@ class WalkForwardAnalyzer:
                  train_window: int = 252,  # giorni di training
                  test_window: int = 63,    # giorni di testing
                  step_size: int = 21,      # passo di avanzamento
-                 retrain_frequency: int = 1):  # ricostruisci il modello ogni N step
+                 retrain_frequency: int = 1):  # riaddestra il modello ogni N finestre
         
         self.train_window = train_window
         self.test_window = test_window
@@ -27,47 +27,51 @@ class WalkForwardAnalyzer:
     
     def run(self,
             data: Dict[str, pd.DataFrame],
-            signal_generator: Any,  # Il tuo motore di segnali
-            model_trainer: Any,    # Il trainer del modello
+            signal_generator: Any = None,
+            model_trainer: Any = None,
+            verbose: bool = True,
             **backtest_kwargs) -> pd.DataFrame:
         """
         Esegue l'analisi walk-forward.
+
+        signal_generator: un SignalEnsemble (segnali diretti), usato se model_trainer è None
+        model_trainer:    un ModelTrainer; viene riaddestrato su ogni finestra di training
+                          e usato per i segnali della finestra di test successiva
         """
+        from models.predict import ModelPredictor
+
         dates = self._get_common_dates(data)
         results = []
-        
-        i = 0
-        while i < len(dates) - self.train_window - self.test_window:
-            # Split dei dati
-            train_end = i + self.train_window
-            test_end = train_end + self.test_window
-            
-            train_dates = dates[i:train_end]
-            test_dates = dates[train_end:test_end]
-            
-            print(f"Window {i//self.step_size + 1}:")
-            print(f"  Train: {train_dates[0].date()} -> {train_dates[-1].date()}")
-            print(f"  Test: {test_dates[0].date()} -> {test_dates[-1].date()}")
-            
-            # 1. Addestra il modello sui dati di training
-            train_data = {s: df.loc[train_dates] for s, df in data.items()}
-            
-            if i % (self.step_size * self.retrain_frequency) == 0:
-                model = model_trainer.train(train_data)
-            else:
-                # Usa il modello precedente
-                pass
-            
-            # 2. Genera segnali per il periodo di test
-            signals = self._generate_signals(data, test_dates, signal_generator, model)
-            
-            # 3. Esegui il backtest sul periodo di test
-            test_data = {s: df.loc[test_dates] for s, df in data.items()}
-            
-            engine = BacktestEngine(**backtest_kwargs)
-            result = engine.run(test_data, signals)
-            
-            # 4. Registra i risultati
+        predictor = None
+
+        i, window = 0, 0
+        while i + self.train_window + self.test_window <= len(dates):
+            train_dates = dates[i:i + self.train_window]
+            test_dates = dates[i + self.train_window:i + self.train_window + self.test_window]
+            if verbose:
+                print(f"Finestra {window + 1}: train {train_dates[0].date()} -> {train_dates[-1].date()}, "
+                      f"test {test_dates[0].date()} -> {test_dates[-1].date()}")
+
+            if model_trainer is not None and (predictor is None or window % self.retrain_frequency == 0):
+                train_data = {s: df.loc[train_dates[0]:train_dates[-1]] for s, df in data.items()}
+                model_trainer.train(train_data)
+                predictor = ModelPredictor()
+                predictor.model, predictor.meta = model_trainer.model, model_trainer.meta
+                predictor.features = model_trainer.meta['features']
+
+            signals = {}
+            for symbol, df in data.items():
+                history = df.loc[:test_dates[-1]]  # solo passato e periodo di test: niente futuro
+                if predictor is not None:
+                    series = predictor.predict_series(history)
+                else:
+                    series = signal_generator.signal_series(
+                        history['close'], start=history.index.get_loc(test_dates[0]) + 1)
+                signals[symbol] = series.reindex(test_dates)
+
+            test_data = {s: df.loc[test_dates[0]:test_dates[-1]] for s, df in data.items()}
+            result = BacktestEngine(**backtest_kwargs).run(test_data, signals)
+
             results.append({
                 'window_start': train_dates[0],
                 'train_end': train_dates[-1],
@@ -79,50 +83,21 @@ class WalkForwardAnalyzer:
                 'max_drawdown': result.max_drawdown,
                 'win_rate': result.win_rate,
                 'total_trades': result.total_trades,
-                'profit_factor': result.profit_factor
+                'profit_factor': result.profit_factor,
             })
-            
             i += self.step_size
-        
+            window += 1
+
         self.results = pd.DataFrame(results)
-        
         return self.results
-    
-    def _get_common_dates(self, data: Dict[str, pd.DataFrame]) -> List[datetime]:
+
+    @staticmethod
+    def _get_common_dates(data: Dict[str, pd.DataFrame]) -> List[datetime]:
         """Ottiene le date comuni a tutti i simboli"""
         all_dates = set(data[list(data.keys())[0]].index)
         for df in data.values():
             all_dates = all_dates.intersection(df.index)
         return sorted(all_dates)
-    
-    def _generate_signals(self, data: Dict[str, pd.DataFrame], 
-                          dates: List[datetime],
-                          signal_generator: Any,
-                          model: Any) -> Dict[str, pd.Series]:
-        """Genera i segnali per il periodo di test"""
-        signals = {}
-        
-        for symbol, df in data.items():
-            signal_series = pd.Series(index=dates, dtype=float)
-            
-            for date in dates:
-                # Ottieni i prezzi fino a questa data
-                prices = df.loc[:date, 'close']
-                
-                # Genera il segnale
-                if model is not None:
-                    # Usa il modello ML
-                    features = signal_generator.extract_features(prices)
-                    signal = model.predict(features)
-                else:
-                    # Usa il motore di segnali diretto
-                    signal = signal_generator.calculate(prices)
-                
-                signal_series.loc[date] = signal
-            
-            signals[symbol] = signal_series
-        
-        return signals
     
     def analyze_results(self) -> Dict[str, float]:
         """

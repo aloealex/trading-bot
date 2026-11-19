@@ -1,8 +1,14 @@
 # models/neural_network.py
+"""
+Rete neurale (PyTorch) che stima il rendimento futuro.
+PyTorch è facoltativo: se non è installato il resto del bot funziona lo stesso
+(prima l'intero package `models` andava in crash all'import).
+"""
+import copy
+import logging
+from typing import Dict, List, Optional
+
 import numpy as np
-from typing import Dict, List, Optional, Any, Tuple
-import warnings
-warnings.filterwarnings('ignore')
 
 try:
     import torch
@@ -10,198 +16,154 @@ try:
     import torch.optim as optim
     from torch.utils.data import DataLoader, TensorDataset
     TORCH_AVAILABLE = True
-except ImportError:
+except ImportError:  # pragma: no cover - dipende dall'ambiente
     TORCH_AVAILABLE = False
 
-import logging
+from .xgboost_model import chronological_split
+
 logger = logging.getLogger(__name__)
 
-class TradingNet(nn.Module):
-    """Rete neurale per il trading."""
-    
-    def __init__(self,
-                 input_dim: int,
-                 hidden_dims: List[int] = [512, 256, 128],
-                 dropout_rate: float = 0.3,
-                 output_dim: int = 1):
-        super().__init__()
-        
-        layers = []
-        prev_dim = input_dim
-        
-        for hidden_dim in hidden_dims:
-            layers.append(nn.Linear(prev_dim, hidden_dim))
-            layers.append(nn.BatchNorm1d(hidden_dim))
-            layers.append(nn.ReLU())
-            layers.append(nn.Dropout(dropout_rate))
-            prev_dim = hidden_dim
-        
-        layers.append(nn.Linear(prev_dim, output_dim))
-        layers.append(nn.Tanh())
-        
-        self.network = nn.Sequential(*layers)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.network(x)
+
+if TORCH_AVAILABLE:
+    class TradingNet(nn.Module):
+        """Rete feed-forward per il trading."""
+
+        def __init__(self, input_dim: int, hidden_dims: List[int] = (128, 64),
+                     dropout_rate: float = 0.3, output_dim: int = 1):
+            super().__init__()
+            layers, prev = [], input_dim
+            for h in hidden_dims:
+                layers += [nn.Linear(prev, h), nn.BatchNorm1d(h), nn.ReLU(), nn.Dropout(dropout_rate)]
+                prev = h
+            # uscita lineare: il target (standardizzato) non è limitato a [-1, 1]
+            layers.append(nn.Linear(prev, output_dim))
+            self.network = nn.Sequential(*layers)
+
+        def forward(self, x):
+            return self.network(x)
+
 
 class NeuralTradingModel:
-    """Modello di Rete Neurale."""
-    
+    """Modello di rete neurale."""
+
+    name = 'neural'
+
     def __init__(self,
-                 hidden_dims: List[int] = [512, 256, 128],
+                 hidden_dims: List[int] = (128, 64),
                  dropout_rate: float = 0.3,
                  learning_rate: float = 1e-3,
                  batch_size: int = 256,
                  epochs: int = 100,
-                 early_stopping_patience: int = 20):
-        
+                 early_stopping_patience: int = 15,
+                 random_state: int = 42,
+                 feature_names: Optional[List[str]] = None):
         if not TORCH_AVAILABLE:
-            raise ImportError("PyTorch non disponibile")
-        
-        self.hidden_dims = hidden_dims
+            raise ImportError("PyTorch non installato: usa model_type='xgboost' oppure installa torch")
+        self.hidden_dims = list(hidden_dims)
         self.dropout_rate = dropout_rate
         self.learning_rate = learning_rate
         self.batch_size = batch_size
         self.epochs = epochs
         self.early_stopping_patience = early_stopping_patience
-        
+        self.random_state = random_state
+        self.feature_names = feature_names
+
         self.model = None
         self.input_dim = None
         self.scaler_mean = None
         self.scaler_std = None
+        self.y_mean = 0.0
+        self.y_std = 1.0
         self.is_trained = False
-    
+
     def train(self, X: np.ndarray, y: np.ndarray,
               X_val: Optional[np.ndarray] = None,
               y_val: Optional[np.ndarray] = None) -> Dict[str, float]:
-        """Addestra la rete neurale."""
+        torch.manual_seed(self.random_state)
+        X, y = np.asarray(X, dtype=float), np.asarray(y, dtype=float)
+        if X_val is None or y_val is None:
+            X, X_val, y, y_val = chronological_split(X, y)
+
         self.input_dim = X.shape[1]
-        
-        self.model = TradingNet(
-            input_dim=self.input_dim,
-            hidden_dims=self.hidden_dims,
-            dropout_rate=self.dropout_rate
-        )
-        
+        self.model = TradingNet(self.input_dim, self.hidden_dims, self.dropout_rate)
+
         self._fit_scaler(X)
-        X_scaled = self._transform_scaler(X)
-        y_scaled = y
-        
-        if X_val is not None and y_val is not None:
-            X_val_scaled = self._transform_scaler(X_val)
-            y_val_scaled = y_val
-        else:
-            from sklearn.model_selection import train_test_split
-            X_scaled, X_val_scaled, y_scaled, y_val_scaled = train_test_split(
-                X_scaled, y, test_size=0.2, random_state=42
-            )
-        
-        train_dataset = TensorDataset(
-            torch.FloatTensor(X_scaled),
-            torch.FloatTensor(y_scaled).reshape(-1, 1)
-        )
-        val_dataset = TensorDataset(
-            torch.FloatTensor(X_val_scaled),
-            torch.FloatTensor(y_val_scaled).reshape(-1, 1)
-        )
-        
-        train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False)
-        
-        optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
+        self.y_mean, self.y_std = float(y.mean()), float(y.std() or 1.0)
+        Xs, Xvs = self._transform_scaler(X), self._transform_scaler(X_val)
+        ys, yvs = (y - self.y_mean) / self.y_std, (y_val - self.y_mean) / self.y_std
+
+        train_loader = DataLoader(
+            TensorDataset(torch.FloatTensor(Xs), torch.FloatTensor(ys).reshape(-1, 1)),
+            batch_size=self.batch_size, shuffle=True, drop_last=len(Xs) > self.batch_size)
+        X_val_t = torch.FloatTensor(Xvs)
+        y_val_t = torch.FloatTensor(yvs).reshape(-1, 1)
+
+        optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-4)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
         criterion = nn.MSELoss()
-        
-        best_val_loss = float('inf')
-        patience_counter = 0
-        best_model_state = None
-        
+
+        best_val, best_state, patience, epoch = float('inf'), None, 0, 0
         for epoch in range(self.epochs):
             self.model.train()
-            epoch_train_loss = 0
-            
-            for batch_X, batch_y in train_loader:
+            for bx, by in train_loader:
                 optimizer.zero_grad()
-                outputs = self.model(batch_X)
-                loss = criterion(outputs, batch_y)
+                loss = criterion(self.model(bx), by)
                 loss.backward()
                 optimizer.step()
-                epoch_train_loss += loss.item()
-            
+
             self.model.eval()
-            epoch_val_loss = 0
-            
             with torch.no_grad():
-                for batch_X, batch_y in val_loader:
-                    outputs = self.model(batch_X)
-                    loss = criterion(outputs, batch_y)
-                    epoch_val_loss += loss.item()
-            
-            avg_train_loss = epoch_train_loss / len(train_loader)
-            avg_val_loss = epoch_val_loss / len(val_loader)
-            
-            scheduler.step(avg_val_loss)
-            
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                patience_counter = 0
-                best_model_state = self.model.state_dict().copy()
+                val_loss = criterion(self.model(X_val_t), y_val_t).item()
+            scheduler.step(val_loss)
+
+            if val_loss < best_val:
+                best_val, patience = val_loss, 0
+                # deepcopy: state_dict().copy() copiava solo i riferimenti ai tensori,
+                # quindi il "miglior" modello veniva sovrascritto dagli epoch successivi
+                best_state = copy.deepcopy(self.model.state_dict())
             else:
-                patience_counter += 1
-                if patience_counter >= self.early_stopping_patience:
+                patience += 1
+                if patience >= self.early_stopping_patience:
                     break
-        
-        if best_model_state is not None:
-            self.model.load_state_dict(best_model_state)
-        
+
+        if best_state is not None:
+            self.model.load_state_dict(best_state)
         self.is_trained = True
-        
+        pred_val = self.predict(X_val)
         return {
-            'best_val_loss': best_val_loss,
-            'epochs_trained': epoch + 1
+            'best_val_loss': float(best_val),
+            'epochs_trained': epoch + 1,
+            'val_corr': float(np.corrcoef(pred_val, y_val)[0, 1]) if np.std(pred_val) > 0 else 0.0,
         }
-    
+
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """Predice il gradimento."""
         if not self.is_trained:
-            raise ValueError("Model not trained")
-        
+            raise ValueError("Modello non addestrato")
         self.model.eval()
-        X_scaled = self._transform_scaler(X)
-        
         with torch.no_grad():
-            X_tensor = torch.FloatTensor(X_scaled)
-            predictions = self.model(X_tensor).numpy().flatten()
-        
-        return np.clip(predictions, -1, 1)
-    
+            out = self.model(torch.FloatTensor(self._transform_scaler(np.asarray(X, dtype=float))))
+        return out.numpy().flatten() * self.y_std + self.y_mean
+
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        """Predice le probabilità."""
-        predictions = self.predict(X)
-        prob_buy = (predictions + 1) / 2
-        return np.vstack([1 - prob_buy, prob_buy]).T
-    
+        pred = self.predict(X)
+        prob = 1 / (1 + np.exp(-pred / (self.y_std or 1.0)))
+        return np.vstack([1 - prob, prob]).T
+
     def get_feature_importance(self) -> Dict[str, float]:
-        """Stima l'importanza delle feature."""
-        if not self.is_trained or self.model is None:
+        """Importanza stimata come gradiente medio assoluto sull'input (dati standardizzati)."""
+        if not self.is_trained:
             return {}
-        
         self.model.eval()
-        X_test = torch.randn(1000, self.input_dim)
-        X_test.requires_grad = True
-        
-        outputs = self.model(X_test)
-        gradients = torch.autograd.grad(outputs.sum(), X_test, create_graph=True)[0]
-        importance = gradients.abs().mean(dim=0).detach().numpy()
-        
-        return {f'feature_{i}': imp for i, imp in enumerate(importance)}
-    
+        X_test = torch.randn(1000, self.input_dim, requires_grad=True)
+        grads = torch.autograd.grad(self.model(X_test).sum(), X_test)[0]
+        importance = grads.abs().mean(dim=0).numpy()
+        names = self.feature_names or [f'feature_{i}' for i in range(len(importance))]
+        return {n: float(v) for n, v in zip(names, importance)}
+
     def _fit_scaler(self, X: np.ndarray):
-        """Adatta lo scaler."""
         self.scaler_mean = X.mean(axis=0)
         self.scaler_std = X.std(axis=0)
         self.scaler_std[self.scaler_std < 1e-8] = 1
-    
+
     def _transform_scaler(self, X: np.ndarray) -> np.ndarray:
-        """Applica la normalizzazione."""
         return (X - self.scaler_mean) / self.scaler_std

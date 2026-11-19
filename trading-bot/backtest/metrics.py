@@ -3,6 +3,11 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Any
 
+def _pnl(trade) -> float:
+    """Accetta sia dict sia oggetti Trade."""
+    return trade.get('pnl', 0) if isinstance(trade, dict) else getattr(trade, 'pnl', 0)
+
+
 class BacktestMetrics:
     """
     Calcolo delle metriche di performance per il backtest.
@@ -62,7 +67,7 @@ class BacktestMetrics:
         """Calcola il win rate."""
         if not trades:
             return 0
-        wins = sum(1 for t in trades if t.get('pnl', 0) > 0)
+        wins = sum(1 for t in trades if _pnl(t) > 0)
         return wins / len(trades)
     
     @staticmethod
@@ -70,8 +75,8 @@ class BacktestMetrics:
         """Calcola il profit factor."""
         if not trades:
             return 0
-        gross_profit = sum(t.get('pnl', 0) for t in trades if t.get('pnl', 0) > 0)
-        gross_loss = abs(sum(t.get('pnl', 0) for t in trades if t.get('pnl', 0) < 0))
+        gross_profit = sum(_pnl(t) for t in trades if _pnl(t) > 0)
+        gross_loss = abs(sum(_pnl(t) for t in trades if _pnl(t) < 0))
         return gross_profit / gross_loss if gross_loss > 0 else np.inf
     
     @staticmethod
@@ -79,7 +84,7 @@ class BacktestMetrics:
         """Calcola l'expectancy."""
         if not trades:
             return 0
-        return np.mean([t.get('pnl', 0) for t in trades])
+        return float(np.mean([_pnl(t) for t in trades]))
     
     @staticmethod
     def var(returns: pd.Series, confidence: float = 0.95) -> float:

@@ -69,22 +69,28 @@ class RaschkePatterns:
         current_price = recent_prices.iloc[-1]
         current_osc = recent_osc.iloc[-1]
         
-        # Divergenza ribassista
-        if current_price > recent_prices.iloc[0] and current_osc < recent_osc.iloc[0]:
-            if current_price > recent_prices.max():
-                price_diff = (current_price - recent_prices.max()) / recent_prices.max()
-                osc_diff = (recent_osc.max() - current_osc) / abs(recent_osc.max())
-                strength = min(1.0, (price_diff + osc_diff) / 2)
-                return -1, strength
-        
-        # Divergenza rialzista
-        if current_price < recent_prices.iloc[0] and current_osc > recent_osc.iloc[0]:
-            if current_price < recent_prices.min():
-                price_diff = (recent_prices.min() - current_price) / recent_prices.min()
-                osc_diff = (current_osc - recent_osc.min()) / abs(recent_osc.min())
-                strength = min(1.0, (price_diff + osc_diff) / 2)
-                return 1, strength
-        
+        # Il massimo/minimo di confronto va preso sulle barre PRECEDENTI:
+        # confrontare il prezzo con un massimo che lo include non scatta mai.
+        prior_prices = recent_prices.iloc[:-1]
+        prior_osc = recent_osc.iloc[:-1]
+        osc_scale = prior_osc.abs().max()
+        if not np.isfinite(osc_scale) or osc_scale == 0:
+            return 0, 0.0
+
+        # Divergenza ribassista: nuovo massimo di prezzo, oscillatore sotto il suo massimo
+        if current_price > prior_prices.max() and current_osc < prior_osc.max():
+            price_diff = (current_price - prior_prices.max()) / prior_prices.max()
+            osc_diff = (prior_osc.max() - current_osc) / osc_scale
+            strength = float(min(1.0, (price_diff + osc_diff) / 2))
+            return -1, strength
+
+        # Divergenza rialzista: nuovo minimo di prezzo, oscillatore sopra il suo minimo
+        if current_price < prior_prices.min() and current_osc > prior_osc.min():
+            price_diff = (prior_prices.min() - current_price) / prior_prices.min()
+            osc_diff = (current_osc - prior_osc.min()) / osc_scale
+            strength = float(min(1.0, (price_diff + osc_diff) / 2))
+            return 1, strength
+
         return 0, 0.0
     
     def anti_pattern(self, prices: pd.Series) -> int:
@@ -97,7 +103,8 @@ class RaschkePatterns:
             return 0
         
         slow_turning_up = (slow_line.iloc[-3] < slow_line.iloc[-2] < slow_line.iloc[-1])
-        osc_approach = abs(oscillator.iloc[-1] - slow_line.iloc[-1]) < 0.1
+        # Soglia relativa al prezzo (0.1 assoluto non ha senso tra titoli da 5$ e da 500$)
+        osc_approach = abs(oscillator.iloc[-1] - slow_line.iloc[-1]) / prices.iloc[-1] < 0.001
         
         price_range = (prices.iloc[-10:].max() - prices.iloc[-10:].min()) / prices.iloc[-10:].mean()
         is_consolidating = price_range < 0.03
@@ -147,14 +154,15 @@ class RaschkePatterns:
             return {'error': 'Dati insufficienti'}
         
         oscillator, slow_line = self._calculate_oscillator(prices)
+        div_type, div_strength = self.divergence(prices)
         
         return {
             'oscillator': oscillator.iloc[-1] if len(oscillator) > 0 else 0,
             'slow_line': slow_line.iloc[-1] if len(slow_line) > 0 else 0,
             'first_cross_buy': self.first_cross(prices, 'buy'),
             'first_cross_sell': self.first_cross(prices, 'sell'),
-            'divergence_type': self.divergence(prices)[0],
-            'divergence_strength': self.divergence(prices)[1],
+            'divergence_type': div_type,
+            'divergence_strength': div_strength,
             'anti_pattern': self.anti_pattern(prices),
             'combined_signal': self.calculate(prices)
         }

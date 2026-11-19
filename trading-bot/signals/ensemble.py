@@ -29,27 +29,66 @@ class SignalEnsemble:
     Combina i segnali dai tre approcci in un unico "gradimento" finale.
     """
     
+    MIN_BARS = 200
+
     def __init__(self,
                  weights: Optional[Dict[str, float]] = None,
-                 adaptive_weights: bool = True):
+                 adaptive_weights: bool = True,
+                 momentum_window: int = 125,
+                 raschke_params: Optional[Dict[str, int]] = None,
+                 mc_simulations: int = 10000,
+                 mc_horizon: int = 252,
+                 mc_confidence: float = 0.95,
+                 mc_use_bootstrap: bool = True,
+                 random_state: Optional[int] = 42):
         
-        self.weights = weights or {
+        self.weights = dict(weights) if weights else {
             'momentum': 0.40,
             'raschke': 0.25,
-            'risk': -0.20,
+            'risk': 0.20,
             'mean_reversion': 0.15
         }
+        # Il risk_score è un punteggio di QUALITÀ (alto = rischio basso / Sharpe alto).
+        # Il vecchio peso negativo (-0.20) invertiva il segno e premiava i titoli più
+        # rischiosi: usiamo sempre il valore assoluto per compatibilità con le config vecchie.
+        if 'risk' in self.weights:
+            self.weights['risk'] = abs(self.weights['risk'])
         
         self.adaptive_weights = adaptive_weights
         self.performance_history = []
         
-        self.clenow = ClenowMomentum()
-        self.raschke = RaschkePatterns()
-        self.risk = MonteCarloRisk()
+        self.clenow = ClenowMomentum(window=momentum_window)
+        self.raschke = RaschkePatterns(**(raschke_params or {}))
+        self.risk = MonteCarloRisk(simulations=mc_simulations,
+                                   horizon=mc_horizon,
+                                   confidence=mc_confidence,
+                                   use_bootstrap=mc_use_bootstrap,
+                                   random_state=random_state)
+
+    @classmethod
+    def from_settings(cls, signal_settings, **overrides) -> 'SignalEnsemble':
+        """Crea l'ensemble a partire da config.settings.SignalSettings."""
+        params = dict(
+            weights=signal_settings.ensemble_weights,
+            momentum_window=signal_settings.momentum_window,
+            raschke_params={
+                'fast': signal_settings.ema_fast,
+                'slow': signal_settings.ema_slow,
+                'divergence_window': signal_settings.divergence_window,
+                'smoothing': signal_settings.smoothing,
+            },
+            mc_simulations=signal_settings.mc_simulations,
+            mc_horizon=signal_settings.mc_horizon,
+            mc_confidence=signal_settings.mc_confidence,
+            mc_use_bootstrap=signal_settings.mc_use_bootstrap,
+        )
+        params.update(overrides)
+        return cls(**params)
     
     def calculate(self, prices: pd.Series, symbol: str = '') -> EnsembleResult:
         """Calcola il gradimento finale per un singolo simbolo."""
-        if len(prices) < 200:
+        prices = prices.dropna()
+        if len(prices) < self.MIN_BARS:
             return EnsembleResult(
                 symbol=symbol,
                 timestamp=datetime.now(),
@@ -81,18 +120,19 @@ class SignalEnsemble:
         
         # 5. RSI
         rsi = self._calculate_rsi(prices, 14)
-        rsi_score = (rsi - 50) / 50 if rsi else 0
+        rsi_score = (rsi - 50) / 50 if rsi is not None else 0.0
         
         # 6. Gradimento finale
+        w = self.weights
         gradimento = (
-            self.weights['momentum'] * normalized_momentum +
-            self.weights['raschke'] * raschke_signal +
-            self.weights['risk'] * risk_score +
-            self.weights['mean_reversion'] * mean_reversion_score +
-            0.05 * rsi_score
+            w.get('momentum', 0.0) * normalized_momentum +
+            w.get('raschke', 0.0) * raschke_signal +
+            w.get('risk', 0.0) * risk_score +
+            w.get('mean_reversion', 0.0) * mean_reversion_score +
+            w.get('rsi', 0.05) * rsi_score
         )
         
-        gradimento = np.clip(gradimento, -1, 1)
+        gradimento = float(np.clip(gradimento, -1, 1))
         
         # 7. Confidenza
         confidence = self._calculate_confidence(
@@ -183,8 +223,9 @@ class SignalEnsemble:
         gain = delta.clip(lower=0)
         loss = -delta.clip(upper=0)
         
-        avg_gain = gain.rolling(period).mean()
-        avg_loss = loss.rolling(period).mean()
+        # Smoothing di Wilder (alpha = 1/period), come nella definizione originale dell'RSI
+        avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+        avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
         
         if avg_loss.iloc[-1] == 0:
             return 100.0
@@ -196,7 +237,7 @@ class SignalEnsemble:
     
     def _calculate_confidence(self, *signal_values: float) -> float:
         """Calcola la confidenza del segnale."""
-        signs = np.sign(signal_values)
+        signs = np.sign(np.asarray(signal_values, dtype=float))
         positive_count = np.sum(signs > 0)
         negative_count = np.sum(signs < 0)
         
@@ -208,6 +249,21 @@ class SignalEnsemble:
             return 0.5
         
         return 0.3
+
+    def signal_series(self, prices: pd.Series, start: int = None, step: int = 1) -> pd.Series:
+        """
+        Serie storica del gradimento, calcolata in modo causale: il valore alla data t
+        usa SOLO i prezzi fino a t (nessun look-ahead). Utile per il backtest.
+        """
+        prices = prices.dropna()
+        start = self.MIN_BARS if start is None else max(start, self.MIN_BARS)
+        out = {}
+        last = np.nan
+        for i in range(start, len(prices) + 1):
+            if (i - start) % step == 0:
+                last = self.calculate(prices.iloc[:i]).gradimento
+            out[prices.index[i - 1]] = last
+        return pd.Series(out, dtype=float)
     
     def _interpret_signal(self,
                          gradimento: float,
